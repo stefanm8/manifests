@@ -1,0 +1,182 @@
+# 🧩 Dgraph Zero: StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: dgraph-zero
+  labels:
+    app: dgraph-zero
+spec:
+  ports:
+  - port: 5080
+    targetPort: 5080
+    name: grpc
+  - port: 6080
+    targetPort: 6080
+    name: http
+  clusterIP: None
+  selector:
+    app: dgraph-zero
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dgraph-zero
+  labels:
+    app: dgraph-zero
+spec:
+  serviceName: dgraph-zero
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dgraph-zero
+  template:
+    metadata:
+      labels:
+        app: dgraph-zero
+    spec:
+      containers:
+      - name: zero
+        image: dgraph/dgraph:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5080
+          name: grpc
+        - containerPort: 6080
+          name: http
+        volumeMounts:
+        - name: datadir
+          mountPath: /dgraph
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 6080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 6080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          dgraph zero --my=$(hostname -f):5080
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+---
+# 🧠 Dgraph Alpha: StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: dgraph-alpha
+  labels:
+    app: dgraph-alpha
+spec:
+  ports:
+  - port: 7080
+    targetPort: 7080
+    name: http
+  - port: 8080
+    targetPort: 8080
+    name: grpc
+  - port: 9080
+    targetPort: 9080
+    name: grpc-internal
+  clusterIP: None
+  selector:
+    app: dgraph-alpha
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dgraph-alpha-public
+  labels:
+    app: dgraph-alpha
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: grpc
+  - port: 9080
+    targetPort: 9080
+    name: grpc-internal
+  selector:
+    app: dgraph-alpha
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dgraph-alpha
+  labels:
+    app: dgraph-alpha
+spec:
+  serviceName: dgraph-alpha
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dgraph-alpha
+  template:
+    metadata:
+      labels:
+        app: dgraph-alpha
+    spec:
+      containers:
+      - name: alpha
+        image: dgraph/dgraph:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 7080
+          name: http
+        - containerPort: 8080
+          name: grpc
+        - containerPort: 9080
+          name: grpc-internal
+        volumeMounts:
+        - name: datadir
+          mountPath: /dgraph
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          dgraph alpha --my=$(hostname -f):7080 --zero=dgraph-zero-0.dgraph-zero:5080
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
