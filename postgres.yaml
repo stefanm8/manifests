@@ -201,7 +201,6 @@ spec:
     spec:
       accessModes:
         - ReadWriteOnce
-      storageClassName: standard  # Change to your storage class
       resources:
         requests:
           storage: 10Gi
