@@ -92,37 +92,6 @@ spec:
   selector:
     app: postgres
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres-lb
-  labels:
-    app: postgres
-spec:
-  type: LoadBalancer
-  ports:
-  - port: 5432
-    targetPort: 5432
-    name: postgres
-  selector:
-    app: postgres
-    role: primary  # Routes to primary instance
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres-read
-  labels:
-    app: postgres
-spec:
-  ports:
-  - port: 5432
-    targetPort: 5432
-    name: postgres
-  selector:
-    app: postgres
-    # Routes to all instances for read queries
----
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
