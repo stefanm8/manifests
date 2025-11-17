@@ -1,0 +1,402 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  labels:
+    app: postgres
+data:
+  POSTGRES_DB: mydb
+  POSTGRES_USER: admin
+  PGDATA: /var/lib/postgresql/data/pgdata
+  # PostgreSQL configuration tuning
+  postgresql.conf: |
+    # Connection Settings
+    max_connections = 200
+    superuser_reserved_connections = 3
+
+    # Memory Settings
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    maintenance_work_mem = 64MB
+    work_mem = 4MB
+
+    # WAL Settings
+    wal_level = replica
+    max_wal_senders = 10
+    max_replication_slots = 10
+    wal_keep_size = 512MB
+    hot_standby = on
+
+    # Checkpoint Settings
+    checkpoint_timeout = 10min
+    checkpoint_completion_target = 0.9
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+
+    # Query Tuning
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+
+    # Logging
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_rotation_age = 1d
+    log_rotation_size = 100MB
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    log_timezone = 'UTC'
+    log_statement = 'mod'
+    log_duration = off
+    log_min_duration_statement = 1000
+
+    # Autovacuum
+    autovacuum = on
+    autovacuum_max_workers = 3
+    autovacuum_naptime = 30s
+
+    # Security
+    ssl = off
+    password_encryption = scram-sha-256
+
+  pg_hba.conf: |
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             ::1/128                 scram-sha-256
+    host    all             all             0.0.0.0/0               scram-sha-256
+    host    replication     replication     0.0.0.0/0               scram-sha-256
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  labels:
+    app: postgres
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "P@ssw0rd123!"  # Change this in production
+  REPLICATION_PASSWORD: "R3pl1c@t10n!"  # Change this in production
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  clusterIP: None  # Headless service for StatefulSet
+  selector:
+    app: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-lb
+  labels:
+    app: postgres
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres
+    role: primary  # Routes to primary instance
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-read
+  labels:
+    app: postgres
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres
+    # Routes to all instances for read queries
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 3  # 1 primary + 2 replicas for high availability
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_PASSWORD
+        - name: PGDATA
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: PGDATA
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+        - name: postgres-config
+          mountPath: /etc/postgresql/pg_hba.conf
+          subPath: pg_hba.conf
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                # Gracefully shutdown PostgreSQL
+                su - postgres -c "pg_ctl stop -D $PGDATA -m fast"
+      volumes:
+      - name: postgres-config
+        configMap:
+          name: postgres-config
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: standard  # Change to your storage class
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  labels:
+    app: postgres
+data:
+  01-init-extensions.sql: |
+    -- Enable commonly used extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+    CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+    CREATE EXTENSION IF NOT EXISTS "btree_gin";
+    CREATE EXTENSION IF NOT EXISTS "btree_gist";
+
+  02-init-schema.sql: |
+    -- Create application schema
+    CREATE SCHEMA IF NOT EXISTS app;
+
+    -- Grant permissions
+    GRANT ALL PRIVILEGES ON SCHEMA app TO admin;
+    GRANT USAGE ON SCHEMA app TO PUBLIC;
+
+  03-monitoring.sql: |
+    -- Create monitoring views
+    CREATE OR REPLACE VIEW app.pg_stat_activity_custom AS
+    SELECT
+      pid,
+      usename,
+      application_name,
+      client_addr,
+      backend_start,
+      state,
+      query_start,
+      query
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+    ORDER BY query_start DESC;
+
+    -- Create function to check connection count
+    CREATE OR REPLACE FUNCTION app.connection_count()
+    RETURNS TABLE(total int, active int, idle int) AS $$
+    BEGIN
+      RETURN QUERY
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE state = 'active')::int AS active,
+        COUNT(*) FILTER (WHERE state = 'idle')::int AS idle
+      FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid();
+    END;
+    $$ LANGUAGE plpgsql;
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  labels:
+    app: postgres
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgres
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-backup-script
+  labels:
+    app: postgres
+data:
+  backup.sh: |
+    #!/bin/bash
+    set -e
+
+    BACKUP_DIR="/backups"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    BACKUP_FILE="${BACKUP_DIR}/postgres_backup_${TIMESTAMP}.sql.gz"
+
+    echo "Starting backup at $(date)"
+
+    # Create backup directory if it doesn't exist
+    mkdir -p ${BACKUP_DIR}
+
+    # Perform backup
+    pg_dumpall -U ${POSTGRES_USER} | gzip > ${BACKUP_FILE}
+
+    echo "Backup completed: ${BACKUP_FILE}"
+
+    # Keep only last 7 days of backups
+    find ${BACKUP_DIR} -name "postgres_backup_*.sql.gz" -mtime +7 -delete
+
+    echo "Old backups cleaned up"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  labels:
+    app: postgres
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: postgres-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: backup
+            image: postgres:16-alpine
+            command:
+            - /bin/bash
+            - /scripts/backup.sh
+            env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGHOST
+              value: postgres-0.postgres
+            volumeMounts:
+            - name: backup-script
+              mountPath: /scripts
+            - name: backup-storage
+              mountPath: /backups
+          volumes:
+          - name: backup-script
+            configMap:
+              name: postgres-backup-script
+              defaultMode: 0755
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: postgres-backup-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-pvc
+  labels:
+    app: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
